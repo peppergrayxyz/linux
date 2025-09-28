@@ -792,12 +792,23 @@ static int __kprobes do_translation_fault(unsigned long far,
 	return 0;
 }
 
+
+#ifdef CONFIG_AMPERE_ERRATUM_82288
+extern int fixup_alignment_ampere(unsigned long far, unsigned int esr, struct pt_regs *regs);
+#endif
+
 static int do_alignment_fault(unsigned long far, unsigned long esr,
 			      struct pt_regs *regs)
 {
 	if (IS_ENABLED(CONFIG_COMPAT_ALIGNMENT_FIXUPS) &&
 	    compat_user_mode(regs))
 		return do_compat_alignment_fixup(far, regs);
+
+	#ifdef CONFIG_AMPERE_ERRATUM_82288
+	if (!fixup_alignment_ampere(far, esr, regs))
+		return 0;
+	#endif
+
 	do_bad_area(far, esr, regs);
 	return 0;
 }

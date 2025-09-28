@@ -3,6 +3,20 @@
 #include <linux/mm.h>
 #include <linux/io.h>
 
+
+#ifdef CONFIG_AMPERE_ERRATUM_82288
+bool have_ampere_erratum_82288 __read_mostly;
+EXPORT_SYMBOL(have_ampere_erratum_82288);
+
+static bool is_altra_pci(phys_addr_t phys_addr, size_t size)
+{
+	phys_addr_t end = phys_addr + size;
+	return (phys_addr < 0x80000000 ||
+		(end > 0x200000000000 && phys_addr < 0x400000000000) ||
+		(end > 0x600000000000 && phys_addr < 0x800000000000));
+}
+#endif
+
 static ioremap_prot_hook_t ioremap_prot_hook;
 
 int arm64_ioremap_prot_hook_register(ioremap_prot_hook_t hook)
@@ -27,6 +41,11 @@ void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
 	if (WARN_ON(pfn_is_map_memory(__phys_to_pfn(phys_addr))))
 		return NULL;
 
+	#ifdef CONFIG_AMPERE_ERRATUM_82288
+	if (unlikely(have_ampere_erratum_82288 && is_altra_pci(phys_addr, size)))
+		pgprot = pgprot_device(pgprot);
+	#endif
+		
 	/*
 	 * If a hook is registered (e.g. for confidential computing
 	 * purposes), call that now and barf if it fails.

@@ -16,6 +16,10 @@
 #define pcibios_assign_all_busses() \
 	(pci_has_flag(PCI_REASSIGN_ALL_BUS))
 
+#ifdef CONFIG_AMPERE_ERRATUM_82288
+extern bool __read_mostly have_ampere_erratum_82288;
+#endif
+
 #define arch_can_pci_mmap_wc() 1
 
 /* Generic PCI */

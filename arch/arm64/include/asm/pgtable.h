@@ -339,8 +339,16 @@ static inline pte_t pte_mkyoung(pte_t pte)
 	return set_pte_bit(pte, __pgprot(PTE_AF));
 }
 
+#ifdef CONFIG_AMPERE_ERRATUM_82288
+extern bool __read_mostly have_ampere_erratum_82288;
+static inline pte_t pte_mkspecial_ampere(pte_t pte);
+#endif
+
 static inline pte_t pte_mkspecial(pte_t pte)
 {
+#ifdef CONFIG_AMPERE_ERRATUM_82288
+	pte = pte_mkspecial_ampere(pte);
+#endif
 	return set_pte_bit(pte, __pgprot(PTE_SPECIAL));
 }
 
@@ -786,6 +794,22 @@ static inline void __set_puds(struct mm_struct *mm,
 #define pgprot_tagged(prot) \
 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, PTE_ATTRINDX(MT_NORMAL_TAGGED))
 #define pgprot_mhp	pgprot_tagged
+
+#ifdef CONFIG_AMPERE_ERRATUM_82288
+pte_t pte_mkspecial_ampere(pte_t pte)
+{
+	phys_addr_t phys = __pte_to_phys(pte);
+	pgprot_t 	prot = __pgprot(pte_val(pte) & ~PHYS_TO_PTE_ADDR_MASK);
+
+	if (unlikely(have_ampere_erratum_82288) &&
+		(phys < 0x80000000 ||
+		(phys >= 0x200000000000 && phys < 0x400000000000) ||
+		(phys >= 0x600000000000 && phys < 0x800000000000))) {
+		pte  = __pte(__phys_to_pte_val(phys) | pgprot_val(pgprot_device(prot)));
+	}
+	return pte;
+}
+#endif
 /*
  * DMA allocations for non-coherent devices use what the Arm architecture calls
  * "Normal non-cacheable" memory, which permits speculation, unaligned accesses

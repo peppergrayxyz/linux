@@ -187,6 +187,8 @@
 #define PTE_ADDR_HIGH_SHIFT	42
 #define PHYS_TO_PTE_ADDR_MASK	GENMASK_ULL(49, 8)
 #endif
+#else
+#define PHYS_TO_PTE_ADDR_MASK	PTE_ADDR_LOW
 #endif
 
 /*
