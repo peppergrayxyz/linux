@@ -26,7 +26,7 @@ KCOV_INSTRUMENT_entry-common.o := n
 KCOV_INSTRUMENT_idle.o := n
 
 # Object file lists.
-obj-y			:= debug-monitors.o entry.o irq.o fpsimd.o		\
+obj-y			:= alignment.o debug-monitors.o entry.o irq.o fpsimd.o	\
 			   entry-common.o entry-fpsimd.o process.o ptrace.o	\
 			   setup.o signal.o sys.o stacktrace.o time.o traps.o	\
 			   io.o vdso.o hyp-stub.o psci.o cpu_ops.o		\
@@ -35,6 +35,7 @@ obj-y			:= debug-monitors.o entry.o irq.o fpsimd.o		\
 			   smp.o smp_spin_table.o topology.o smccc-call.o	\
 			   syscall.o proton-pack.o idle.o patching.o pi/	\
 			   rsi.o jump_label.o
+CFLAGS_REMOVE_alignment.o := -mgeneral-regs-only
 
 obj-$(CONFIG_COMPAT)			+= sys32.o signal32.o			\
 					   sys_compat.o
