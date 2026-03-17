@@ -25,8 +25,11 @@ KASAN_SANITIZE_stacktrace.o := n
 KCOV_INSTRUMENT_entry-common.o := n
 KCOV_INSTRUMENT_idle.o := n
 
+CFLAGS_alignment.o		+= $(CC_FLAGS_FPU)
+CFLAGS_REMOVE_alignment.o	+= $(CC_FLAGS_NO_FPU)
+
 # Object file lists.
-obj-y			:= debug-monitors.o entry.o irq.o fpsimd.o		\
+obj-y			:= alignment.o debug-monitors.o entry.o irq.o fpsimd.o	\
 			   entry-common.o entry-fpsimd.o process.o ptrace.o	\
 			   setup.o signal.o sys.o stacktrace.o time.o traps.o	\
 			   io.o vdso.o hyp-stub.o psci.o cpu_ops.o		\
