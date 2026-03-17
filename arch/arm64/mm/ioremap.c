@@ -2,6 +2,7 @@
 
 #include <linux/mm.h>
 #include <linux/io.h>
+#include <linux/pci.h>
 
 static ioremap_prot_hook_t ioremap_prot_hook;
 
@@ -13,6 +14,29 @@ int arm64_ioremap_prot_hook_register(ioremap_prot_hook_t hook)
 	ioremap_prot_hook = hook;
 	return 0;
 }
+
+#ifdef CONFIG_ALTRA_ERRATUM_82288
+DEFINE_STATIC_KEY_FALSE(have_altra_erratum_82288);
+
+bool is_pci_mmio(phys_addr_t phys_addr, size_t size)
+{
+	struct pci_host_bridge *bridge;
+	struct resource_entry *entry;
+	struct resource res;
+	struct pci_bus *bus;
+
+	res = DEFINE_RES_MEM(phys_addr, size);
+	bus = NULL;
+	while ((bus = pci_find_next_bus(bus)) != NULL) {
+		bridge = to_pci_host_bridge(bus->bridge);
+		resource_list_for_each_entry(entry, &bridge->windows) {
+			if (resource_contains(entry->res, &res))
+				return true;
+		}
+	}
+	return false;
+}
+#endif
 
 void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
 			   pgprot_t pgprot)
@@ -35,6 +59,12 @@ void __iomem *ioremap_prot(phys_addr_t phys_addr, size_t size,
 	    WARN_ON(ioremap_prot_hook(phys_addr, size, &pgprot))) {
 		return NULL;
 	}
+
+#ifdef CONFIG_ALTRA_ERRATUM_82288
+	if (static_branch_unlikely(&have_altra_erratum_82288) &&
+	    is_pci_mmio(phys_addr, size))
+		pgprot = pgprot_device(pgprot);
+#endif
 
 	return generic_ioremap_prot(phys_addr, size, pgprot);
 }
