@@ -6310,6 +6310,17 @@ DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_REDHAT, 0x0005, of_pci_make_dev_node);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_EFAR, 0x9660, of_pci_make_dev_node);
 DECLARE_PCI_FIXUP_FINAL(PCI_VENDOR_ID_RPI, PCI_DEVICE_ID_RPI_RP1_C0, of_pci_make_dev_node);
 
+#ifdef CONFIG_ALTRA_ERRATUM_82288
+static void quirk_altra_erratum_82288(struct pci_dev *dev)
+{
+	pr_info_once("Write combining PCI maps disabled due to hardware erratum\n");
+	static_branch_enable(&have_altra_erratum_82288);
+}
+DECLARE_PCI_FIXUP_EARLY(PCI_VENDOR_ID_AMPERE, 0xe100, quirk_altra_erratum_82288);
+static int setup_ampere_altra_pcie_65(char *) { quirk_altra_erratum_82288(NULL); return 0; }
+early_param("ampere_altra_pcie_65", setup_ampere_altra_pcie_65);
+#endif
+
 /*
  * Devices known to require a longer delay before first config space access
  * after reset recovery or resume from D3cold:

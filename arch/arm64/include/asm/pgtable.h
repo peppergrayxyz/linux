@@ -340,11 +340,6 @@ static inline pte_t pte_mkyoung(pte_t pte)
 	return set_pte_bit(pte, __pgprot(PTE_AF));
 }
 
-static inline pte_t pte_mkspecial(pte_t pte)
-{
-	return set_pte_bit(pte, __pgprot(PTE_SPECIAL));
-}
-
 static inline pte_t pte_mkcont(pte_t pte)
 {
 	return set_pte_bit(pte, __pgprot(PTE_CONT));
@@ -803,6 +798,27 @@ static inline void __set_puds(struct mm_struct *mm,
 #define pgprot_dmacoherent(prot) \
 	__pgprot_modify(prot, PTE_ATTRINDX_MASK, \
 			PTE_ATTRINDX(MT_NORMAL_NC) | PTE_PXN | PTE_UXN)
+
+#ifdef CONFIG_ALTRA_ERRATUM_82288
+extern struct static_key_false have_altra_erratum_82288;
+
+bool is_pci_mmio(phys_addr_t phys_addr, size_t size);
+#endif
+
+static inline pte_t pte_mkspecial(pte_t pte)
+{
+#ifdef CONFIG_ALTRA_ERRATUM_82288
+	phys_addr_t phys = __pte_to_phys(pte);
+	pgprot_t prot = __pgprot(pte_val(pte) & ~__phys_to_pte_val(__pte_to_phys(__pte(~0ull))));
+
+	if (static_branch_unlikely(&have_altra_erratum_82288) &&
+	    is_pci_mmio(phys, PAGE_SIZE)) {
+		pte = __pte(__phys_to_pte_val(phys) | pgprot_val(pgprot_device(prot)));
+	}
+#endif
+
+	return set_pte_bit(pte, __pgprot(PTE_SPECIAL));
+}
 
 #define __HAVE_PHYS_MEM_ACCESS_PROT
 struct file;

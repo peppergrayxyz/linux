@@ -18,6 +18,12 @@
 
 #define arch_can_pci_mmap_wc() 1
 
+#ifdef CONFIG_ALTRA_ERRATUM_82288
+extern struct static_key_false have_altra_erratum_82288;
+
+bool is_pci_mmio(phys_addr_t phys_addr, size_t size);
+#endif
+
 /* Generic PCI */
 #include <asm-generic/pci.h>
 
