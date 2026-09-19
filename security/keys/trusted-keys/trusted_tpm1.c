@@ -677,7 +677,7 @@ enum {
 	Opt_pcrinfo, Opt_pcrlock, Opt_migratable,
 	Opt_hash,
 	Opt_policydigest,
-	Opt_policyhandle,
+	Opt_policyhandle, Opt_pcrs,
 };
 
 static const match_table_t key_tokens = {
@@ -690,6 +690,7 @@ static const match_table_t key_tokens = {
 	{Opt_hash, "hash=%s"},
 	{Opt_policydigest, "policydigest=%s"},
 	{Opt_policyhandle, "policyhandle=%s"},
+	{Opt_pcrs, "pcrs=sha256:%s"},
 	{Opt_err, NULL}
 };
 
@@ -815,6 +816,13 @@ static int getoptions(char *c, struct trusted_key_payload *pay,
 				return -EINVAL;
 			opt->policydigest_len = digest_len;
 			break;
+		case Opt_pcrs:
+			if (!tpm2 || !IS_ENABLED(CONFIG_TCG_TPM2_HMAC))
+				return -EOPNOTSUPP;
+			res = kstrtou32(args[0].from, 16, &opt->pcr_mask);
+			if (res || !opt->pcr_mask || opt->pcr_mask > 0xffffff)
+				return -EINVAL;
+			break;
 		case Opt_policyhandle:
 			if (!tpm2)
 				return -EINVAL;
@@ -827,6 +835,15 @@ static int getoptions(char *c, struct trusted_key_payload *pay,
 			return -EINVAL;
 		}
 	}
+	/* The in-kernel policy path implements only SHA-256 PolicyPCR. */
+	if (opt->pcr_mask &&
+	    (opt->hash != HASH_ALGO_SHA256 ||
+	     test_bit(Opt_policyhandle, &token_mask) ||
+	     test_bit(Opt_blobauth, &token_mask) ||
+	     test_bit(Opt_policydigest, &token_mask) ||
+	     test_bit(Opt_pcrinfo, &token_mask) ||
+	     test_bit(Opt_pcrlock, &token_mask)))
+		return -EINVAL;
 	return 0;
 }
 

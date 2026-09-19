@@ -397,6 +397,26 @@ static int __init init_trusted(void)
 	return ret;
 }
 
+#ifdef CONFIG_DM_CRYPT_ROOT
+/* Called before userspace, after waiting for the TPM to finish probing. */
+int __init trusted_key_init_tpm(void)
+{
+	int ret;
+
+	if (trusted_key_exit == trusted_key_tpm_ops.exit)
+		return 0;
+	if (trusted_key_exit ||
+	    (trusted_key_source && strcmp(trusted_key_source, "tpm")))
+		return -ENODEV;
+
+	/* init_trusted() may have run before a deferred TPM probe completed. */
+	ret = init_trusted();
+	if (ret)
+		return ret;
+	return trusted_key_exit == trusted_key_tpm_ops.exit ? 0 : -ENODEV;
+}
+#endif
+
 static void __exit cleanup_trusted(void)
 {
 	if (trusted_key_exit)

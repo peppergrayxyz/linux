@@ -50,6 +50,7 @@ struct trusted_key_options {
 	uint32_t policydigest_len;
 	unsigned char policydigest[MAX_DIGEST_SIZE];
 	uint32_t policyhandle;
+	uint32_t pcr_mask;
 	void *private;
 };
 
@@ -82,6 +83,10 @@ struct trusted_key_source {
 };
 
 extern struct key_type key_type_trusted;
+
+#ifdef CONFIG_DM_CRYPT_ROOT
+int __init trusted_key_init_tpm(void);
+#endif
 
 #ifdef CONFIG_TRUSTED_KEYS_DEBUG
 extern bool trusted_debug;

@@ -6732,6 +6732,20 @@ Kernel parameters
 			ramdisk, "nfs" and "cifs" for root on a network file
 			system, or "mtd" and "ubi" for mounting from raw flash.
 
+	rootcrypt=	[KNL] GPT partition to unlock before mounting root.
+			Format: PARTUUID=<canonical-GPT-UUID>
+			Requires CONFIG_DM_CRYPT_ROOT and root=/dev/dm-0.
+			See admin-guide/device-mapper/dm-rootcrypt.rst.
+
+	rootcrypt.key=	[KNL] Key provider for rootcrypt; only "tpm2" is
+			supported, and must be specified explicitly.
+
+	rootcrypt.tpm=	[KNL] TPM chip for rootcrypt. Default and only
+			supported value: 0.
+
+	rootcrypt.token=	[KNL] EFI enrollment slot for rootcrypt. Default
+			and only supported value: 0.
+
 	rootdelay=	[KNL] Delay (in seconds) to pause before attempting to
 			mount the root filesystem
 

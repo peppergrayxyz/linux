@@ -8,6 +8,7 @@
 #include <linux/oid_registry.h>
 #include <linux/string.h>
 #include <linux/err.h>
+#include <linux/random.h>
 #include <linux/tpm.h>
 
 #include <keys/trusted-type.h>
@@ -245,7 +246,7 @@ int tpm2_seal_trusted(struct tpm_chip *chip,
 	if (hash < 0)
 		return hash;
 
-	if (!options->keyhandle)
+	if (!options->keyhandle || options->pcr_mask)
 		return -EINVAL;
 
 	rc = tpm_try_get_ops(chip);
@@ -387,6 +388,8 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
 
 	rc = tpm2_key_decode(payload, options, &blob, &blob_len);
 	if (rc) {
+		if (options->pcr_mask)
+			return rc;
 		/* old form */
 		blob = payload->blob;
 		blob_len = payload->blob_len;
@@ -414,9 +417,19 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
 	if (private_len + 2 + public_len + 2 > blob_len)
 		return -E2BIG;
 
+	/* type, nameAlg, objectAttributes and authPolicy size */
+	if (public_len < 10)
+		return -EINVAL;
 	pub = blob + 2 + private_len + 2;
 	/* key attributes are always at offset 4 */
 	attrs = get_unaligned_be32(pub + 4);
+	if (options->pcr_mask &&
+	    (get_unaligned_be16(pub) != TPM_ALG_KEYEDHASH ||
+	     get_unaligned_be16(pub + 2) != TPM_ALG_SHA256 ||
+	     (attrs & TPM2_OA_USER_WITH_AUTH) ||
+	     get_unaligned_be16(pub + 8) != SHA256_DIGEST_SIZE ||
+	     public_len < 10 + SHA256_DIGEST_SIZE))
+		return -EINVAL;
 
 	if ((attrs & (TPM2_OA_FIXED_TPM | TPM2_OA_FIXED_PARENT)) ==
 	    (TPM2_OA_FIXED_TPM | TPM2_OA_FIXED_PARENT))
@@ -442,8 +455,10 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
 	tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_LOAD);
 
 	rc = tpm_buf_append_name(chip, buf, options->keyhandle, NULL);
-	if (rc)
+	if (rc) {
+		tpm2_end_auth_session(chip);
 		return rc;
+	}
 
 	tpm_buf_append_hmac_session(chip, buf, 0, options->keyauth,
 				    TPM_DIGEST_SIZE);
@@ -468,6 +483,73 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
 	return tpm_ret_to_err(rc);
 }
 
+/*
+ * Create an unbound, unsalted, SHA-256 PolicyPCR session. Such a session
+ * needs no authorization HMAC (it does not use PolicyAuthValue). Unseal
+ * additionally uses the existing salted HMAC session to authenticate the
+ * response and encrypt the returned key. The object policy, not a kernel
+ * comparison of PCR values, decides whether unsealing is permitted.
+ *
+ * The caller holds the chip operations and TPM mutex across this sequence.
+ */
+static int tpm2_start_pcr_session(struct tpm_chip *chip, u32 pcr_mask,
+				u32 *handle)
+{
+	struct tpm_buf *buf __free(kfree) = NULL;
+	u8 nonce[SHA256_DIGEST_SIZE];
+	u32 session;
+	int rc;
+
+	buf = kzalloc(TPM_BUFSIZE, GFP_KERNEL);
+	if (!buf)
+		return -ENOMEM;
+
+	get_random_bytes(nonce, sizeof(nonce));
+	tpm_buf_init(buf, TPM_BUFSIZE);
+	tpm_buf_reset(buf, TPM2_ST_NO_SESSIONS, TPM2_CC_START_AUTH_SESS);
+	tpm_buf_append_u32(buf, TPM2_RH_NULL); /* salt key */
+	tpm_buf_append_u32(buf, TPM2_RH_NULL); /* bind */
+	tpm_buf_append_u16(buf, sizeof(nonce));
+	tpm_buf_append(buf, nonce, sizeof(nonce));
+	tpm_buf_append_u16(buf, 0); /* encryptedSalt */
+	tpm_buf_append_u8(buf, TPM2_SE_POLICY);
+	tpm_buf_append_u16(buf, TPM_ALG_NULL); /* symmetric */
+	tpm_buf_append_u16(buf, TPM_ALG_SHA256);
+
+	rc = tpm_transmit_cmd(chip, buf, 4, "starting PCR policy session");
+	if (rc)
+		return tpm_ret_to_err(rc);
+
+	session = get_unaligned_be32(buf->data + TPM_HEADER_SIZE);
+	if (tpm2_handle_mso(session) != TPM2_MSO_POLICY)
+		return -EIO;
+	if (tpm_buf_length(buf) != TPM_HEADER_SIZE + 6 + sizeof(nonce) ||
+	    get_unaligned_be16(buf->data + TPM_HEADER_SIZE + 4) != sizeof(nonce)) {
+		rc = -EIO;
+		goto flush;
+	}
+
+	tpm_buf_reset(buf, TPM2_ST_NO_SESSIONS, TPM2_CC_POLICY_PCR);
+	tpm_buf_append_u32(buf, session);
+	/* An empty digest asks the TPM to use its current PCR values. */
+	tpm_buf_append_u16(buf, 0);
+	tpm_buf_append_u32(buf, 1); /* one PCR bank */
+	tpm_buf_append_u16(buf, TPM_ALG_SHA256);
+	tpm_buf_append_u8(buf, 3);
+	tpm_buf_append_u8(buf, pcr_mask);
+	tpm_buf_append_u8(buf, pcr_mask >> 8);
+	tpm_buf_append_u8(buf, pcr_mask >> 16);
+	rc = tpm_transmit_cmd(chip, buf, 0, "executing PCR policy");
+	if (rc)
+		goto flush;
+
+	*handle = session;
+	return 0;
+flush:
+	tpm2_flush_context(chip, session);
+	return tpm_ret_to_err(rc);
+}
+
 /**
  * tpm2_unseal_cmd() - execute a TPM2_Unseal command
  *
@@ -486,7 +568,7 @@ static int tpm2_unseal_cmd(struct tpm_chip *chip,
 			   u32 blob_handle)
 {
 	struct tpm_header *head;
-	struct tpm_buf *buf __free(kfree) = NULL;
+	struct tpm_buf *buf __free(kfree_sensitive) = NULL;
 	u16 data_len;
 	int offset;
 	u8 *data;
@@ -495,6 +577,8 @@ static int tpm2_unseal_cmd(struct tpm_chip *chip,
 	rc = tpm2_start_auth_session(chip);
 	if (rc)
 		return rc;
+	if (options->pcr_mask && !tpm2_chip_auth(chip))
+		return -EOPNOTSUPP;
 
 	buf = kzalloc(TPM_BUFSIZE, GFP_KERNEL);
 	if (!buf) {
@@ -506,13 +590,20 @@ static int tpm2_unseal_cmd(struct tpm_chip *chip,
 	tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_UNSEAL);
 
 	rc = tpm_buf_append_name(chip, buf, blob_handle, NULL);
-	if (rc)
+	if (rc) {
+		tpm2_end_auth_session(chip);
 		return rc;
+	}
 
 	if (!options->policyhandle) {
 		tpm_buf_append_hmac_session(chip, buf, TPM2_SA_ENCRYPT,
 					    options->blobauth,
 					    options->blobauth_len);
+	} else if (options->pcr_mask) {
+		/* Keep our policy session alive so the caller always flushes it. */
+		tpm2_buf_append_auth(buf, options->policyhandle, NULL, 0,
+				     TPM2_SA_CONTINUE_SESSION, NULL, 0);
+		tpm_buf_append_hmac_session(chip, buf, TPM2_SA_ENCRYPT, NULL, 0);
 	} else {
 		/*
 		 * FIXME: The policy session was generated outside the
@@ -598,7 +689,19 @@ int tpm2_unseal_trusted(struct tpm_chip *chip,
 	if (rc)
 		goto out;
 
+	if (options->pcr_mask) {
+		rc = tpm2_start_pcr_session(chip, options->pcr_mask,
+					    &options->policyhandle);
+		if (rc)
+			goto flush_blob;
+	}
+
 	rc = tpm2_unseal_cmd(chip, payload, options, blob_handle);
+	if (options->pcr_mask) {
+		tpm2_flush_context(chip, options->policyhandle);
+		options->policyhandle = 0;
+	}
+flush_blob:
 	tpm2_flush_context(chip, blob_handle);
 
 out:

@@ -292,6 +292,20 @@ Usage::
                      same policy and with the same hash algorithm as was used to
                      seal the key.
 
+For TPM2, a native trusted-key blob sealed with a SHA-256 PolicyPCR-only
+policy can be loaded without a userspace policy session::
+
+    keyctl add trusted name "load hex_blob pcrs=sha256:000290" ring
+
+The suffix is a nonzero hexadecimal mask of PCRs 0 through 23; ``000290``
+selects PCRs 4, 7 and 9. This requires ``CONFIG_TCG_TPM2_HMAC``. The kernel
+executes PolicyPCR using the TPM's current values and protects Unseal with
+an additional salted HMAC/encryption session. The object must have a
+SHA-256 policy and must not allow password authorization. This option is
+for loading only and cannot be combined with ``policyhandle``, ``blobauth``,
+``policydigest``, ``pcrinfo`` or ``pcrlock``. The existing ``new`` and
+``policydigest`` options can provision such a key.
+
 "keyctl print" returns an ascii hex copy of the sealed key, which is in standard
 TPM_STORED_DATA format.  The key length for new keys are always in bytes.
 Trusted Keys can be 32 - 128 bytes (256 - 1024 bits), the upper limit is to fit

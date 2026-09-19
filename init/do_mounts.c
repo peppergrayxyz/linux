@@ -8,6 +8,7 @@
 #include <linux/root_dev.h>
 #include <linux/security.h>
 #include <linux/delay.h>
+#include <linux/dm-rootcrypt.h>
 #include <linux/mount.h>
 #include <linux/device.h>
 #include <linux/init.h>
@@ -456,6 +457,8 @@ static dev_t __init parse_root_device(char *root_device_name)
  */
 void __init prepare_namespace(void)
 {
+	int ret;
+
 	if (root_delay) {
 		printk(KERN_INFO "Waiting %d sec before mounting root device...\n",
 		       root_delay);
@@ -470,6 +473,10 @@ void __init prepare_namespace(void)
 	 * for the touchpad of a laptop to initialize.
 	 */
 	wait_for_device_probe();
+
+	ret = dm_crypt_root_setup(saved_root_name);
+	if (ret)
+		panic("rootcrypt: cannot activate encrypted root (%d)", ret);
 
 	md_run_setup();
 

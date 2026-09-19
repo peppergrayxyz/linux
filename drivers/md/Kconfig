@@ -531,6 +531,33 @@ config DM_DUST
 
 	If unsure, say N.
 
+config DM_CRYPT_ROOT
+	bool "TPM2 encrypted root without an initramfs"
+	depends on BLK_DEV_DM=y && DM_CRYPT=y
+	depends on EFI && !BLK_DEV_INITRD
+	depends on TCG_TPM=y && TRUSTED_KEYS=y && TRUSTED_KEYS_TPM
+	depends on SYSTEM_DATA_VERIFICATION
+	select TCG_TPM2_HMAC
+	select CRYPTO_SHA256
+	select CRYPTO_AES
+	select CRYPTO_XTS
+	help
+	  Activate a fixed-format AES-256-XTS root partition using a TPM2
+	  trusted key before mounting root. The signed enrollment record is
+	  read from an EFI variable and verified against built-in certificates.
+	  TPM, storage and root filesystem drivers must be built in.
+	  See Documentation/admin-guide/device-mapper/dm-rootcrypt.rst.
+
+config DM_CRYPT_ROOT_KUNIT_TEST
+	bool "Tests for TPM2 root enrollment parsing" if !KUNIT_ALL_TESTS
+	depends on KUNIT=y && DM_CRYPT_ROOT
+	default KUNIT_ALL_TESTS
+	help
+	  Test root enrollment parsing, including truncated records,
+	  unsupported versions, invalid PCR selections and partition binding.
+	  These tests do not require EFI firmware or a TPM device.
+	  If unsure, say N.
+
 config DM_INIT
 	bool "DM \"dm-mod.create=\" parameter support"
 	depends on BLK_DEV_DM=y
