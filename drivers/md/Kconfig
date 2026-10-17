@@ -549,13 +549,18 @@ config DM_CRYPT_ROOT
 	  See Documentation/admin-guide/device-mapper/dm-rootcrypt.rst.
 
 config DM_CRYPT_ROOT_KUNIT_TEST
-	bool "Tests for TPM2 root enrollment parsing" if !KUNIT_ALL_TESTS
+	bool "KUnit tests for TPM2 root enrollment parsing" if !KUNIT_ALL_TESTS
 	depends on KUNIT=y && DM_CRYPT_ROOT
 	default KUNIT_ALL_TESTS
 	help
-	  Test root enrollment parsing, including truncated records,
-	  unsupported versions, invalid PCR selections and partition binding.
-	  These tests do not require EFI firmware or a TPM device.
+	  This builds KUnit tests for root enrollment parsing, including
+	  truncated records, size limits, unsupported versions, invalid PCR
+	  selections and partition binding. These tests do not require EFI
+	  firmware or a TPM device.
+
+	  For more information on KUnit and unit tests in general, please
+	  refer to the KUnit documentation in Documentation/dev-tools/kunit/.
+
 	  If unsure, say N.
 
 config DM_INIT

@@ -65,9 +65,9 @@ class Toolchain:
                          f"CC={self.llvm_tool('clang')}",
                          f"HOSTCC={self.llvm_tool('clang')}"]
 
-    def guest_command(self):
+    def guest_command(self, headers, output, source):
         if self.compiler == "gcc":
-            command = [f"{self.cross_compile}gcc"]
+            command, libraries = [f"{self.cross_compile}gcc"], ["-lgcc"]
         else:
             # ARCH selects the kernel target; the userspace helper needs its own
             # target and the same LLD, including when LLVM has a version suffix.
@@ -76,7 +76,13 @@ class Toolchain:
                 raise Failure("the selected LLVM linker is missing")
             command = [self.llvm_tool("clang"), "--target=aarch64-linux-gnu",
                        f"--ld-path={os.path.abspath(linker)}"]
-        return command + list(self.guest_cflags)
+            libraries = []
+        # nolibc and the installed UAPI headers replace a target C library.
+        return command + [
+            "-nostdlib", "-nostdinc", "-ffreestanding", "-static",
+            "-Os", "-Wall", "-Wextra", "-Werror",
+            f"-I{SOURCE / 'tools/include/nolibc'}", f"-I{headers / 'include'}",
+            *self.guest_cflags, "-o", str(output), str(source), *libraries]
 
 
 @dataclasses.dataclass(frozen=True)
@@ -85,51 +91,75 @@ class Case:
     record: str = "valid"
     options: str = ROOT_OPTIONS
     error: str = ""
-    witness: str = ""
+    witnesses: tuple = ()
     tpm: bool = True
     plain_fallback: bool = False
     mount_failure: bool = False
 
+
+SIGNATURE_FAILED = "rootcrypt: enrollment signature verification failed"
+UNSEAL_FAILED = "rootcrypt: cannot unseal the volume key"
+TIMED_OUT = "rootcrypt: timed out waiting for backing partition or TPM2 chip 0"
 
 CASES = (
     Case("happy"),
     Case("default-selectors", options=(f"rootcrypt=PARTUUID={fixtures.PARTUUID} "
                                        "rootcrypt.key=tpm2 root=/dev/dm-0")),
     Case("tampered-payload", record="tampered-payload", error="-129",
-         witness="Message digest doesn't match"),
+         witnesses=("Message digest doesn't match", SIGNATURE_FAILED)),
     # RSA padding failure can be EINVAL or EKEYREJECTED, depending on the provider.
-    Case("tampered-signature", record="tampered-signature", error="(?:-22|-129)"),
-    Case("untrusted-signer", record="untrusted", error="-126"),
-    Case("missing-enrollment", record="", error="-2"),
-    Case("truncated-enrollment", record="truncated", error="-22"),
-    Case("wrong-partition-binding", record="wrong-partition", error="-129"),
-    Case("zero-pcr-mask", record="zero-pcr-mask", error="-22"),
-    Case("changed-pcr", record="changed-pcr", error="-1", witness="occurred unsealing"),
+    Case("tampered-signature", record="tampered-signature", error="(?:-22|-129)",
+         witnesses=(SIGNATURE_FAILED,)),
+    Case("untrusted-signer", record="untrusted", error="-126",
+         witnesses=(SIGNATURE_FAILED,)),
+    Case("missing-enrollment", record="", error="-2",
+         witnesses=("rootcrypt: cannot read enrollment EFI variable "
+                    f"LinuxRootKey-{fixtures.PARTUUID}-0 (-2)",)),
+    Case("truncated-enrollment", record="truncated", error="-22",
+         witnesses=("rootcrypt: malformed or unsupported enrollment record",)),
+    Case("wrong-partition-binding", record="wrong-partition", error="-129",
+         witnesses=("rootcrypt: the enrollment is bound to a different partition",)),
+    Case("zero-pcr-mask", record="zero-pcr-mask", error="-22",
+         witnesses=("rootcrypt: malformed or unsupported enrollment record",)),
+    Case("changed-pcr", record="changed-pcr", error="-1",
+         witnesses=("occurred unsealing", UNSEAL_FAILED)),
     Case("wrong-pcr-selection", record="wrong-selection", error="-1",
-         witness="occurred unsealing"),
+         witnesses=("occurred unsealing", UNSEAL_FAILED)),
     Case("password-authorized-object", record="password", error="-22",
-         witness="key_unseal failed"),
+         witnesses=("key_unseal failed", UNSEAL_FAILED)),
     Case("wrong-volume-key", record="wrong-key", mount_failure=True),
-    Case("duplicate-option", options=ROOT_OPTIONS + " rootcrypt.key=tpm2", error="-22"),
-    Case("unsupported-tpm", options=ROOT_OPTIONS.replace("tpm=0", "tpm=1"), error="-22"),
-    Case("unsupported-token", options=ROOT_OPTIONS.replace("token=0", "token=1"), error="-22"),
+    Case("duplicate-option", options=ROOT_OPTIONS + " rootcrypt.key=tpm2", error="-22",
+         witnesses=("rootcrypt: duplicate rootcrypt.key= option",)),
+    Case("unsupported-tpm", options=ROOT_OPTIONS.replace("tpm=0", "tpm=1"), error="-22",
+         witnesses=("rootcrypt: unsupported rootcrypt.tpm=1",)),
+    Case("unsupported-token", options=ROOT_OPTIONS.replace("token=0", "token=1"), error="-22",
+         witnesses=("rootcrypt: unsupported rootcrypt.token=1",)),
     Case("missing-key-option", options=ROOT_OPTIONS.replace("rootcrypt.key=tpm2 ", ""),
-         error="-22"),
+         error="-22", witnesses=("are required",)),
     Case("malformed-partuuid", options=ROOT_OPTIONS.replace(fixtures.PARTUUID, "bad-uuid"),
-         error="-22"),
+         error="-22", witnesses=("rootcrypt: unsupported rootcrypt=PARTUUID=bad-uuid",)),
     Case("no-plaintext-fallback", options=ROOT_OPTIONS.replace(
         "root=/dev/dm-0", f"root=PARTUUID={fixtures.PLAINTEXT_UUID}"),
-         error="-22", plain_fallback=True),
-    Case("missing-tpm", error="-110", tpm=False,
-         witness="timed out waiting for backing partition or TPM2 chip 0"),
+         error="-22", plain_fallback=True,
+         witnesses=("rootcrypt: root=/dev/dm-0 is required",)),
+    Case("missing-tpm", error="-110", tpm=False, witnesses=(TIMED_OUT,)),
     Case("missing-partition", error="-110",
          options=ROOT_OPTIONS.replace(fixtures.PARTUUID, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"),
-         witness="timed out waiting for backing partition or TPM2 chip 0"),
+         witnesses=(TIMED_OUT,)),
 )
 
 
 class Failure(RuntimeError):
     pass
+
+
+class FirmwareFailure(Failure):
+    """The firmware failed before the kernel under test could be judged."""
+
+
+BOOT_ATTEMPTS = 3
+KERNEL_STARTED = "Booting Linux on physical CPU"
+FIRMWARE_TPM_FAILURE = "EFI stub: WARNING: Failed to measure"
 
 
 def stop(process):
@@ -164,6 +194,41 @@ def run_logged(command, log, timeout=None, env=None):
         finally:
             # Also runs on Ctrl-C, including during a build or VM boot.
             stop(process)
+
+
+def run_vm(command, log, timeout):
+    """Run QEMU like run_logged(), reporting firmware failures separately."""
+    # AAVMF occasionally stalls on QEMU's TPM before reaching the kernel.
+    firmware_timeout = timeout / 3
+    started = timed_out = False
+    with log.open("w") as output:
+        output.write(shlex.join(map(str, command)) + "\n")
+        output.flush()
+        process = subprocess.Popen(command, stdin=subprocess.DEVNULL, stdout=output,
+                                   stderr=subprocess.STDOUT, start_new_session=True)
+        begin = time.monotonic()
+        try:
+            while process.poll() is None:
+                elapsed = time.monotonic() - begin
+                if elapsed >= timeout:
+                    timed_out = True
+                    break
+                if not started:
+                    started = KERNEL_STARTED in log.read_text(errors="replace")
+                    if not started and elapsed >= firmware_timeout:
+                        raise FirmwareFailure("firmware did not start the kernel within "
+                                              f"{firmware_timeout:.0f}s; see {log}")
+                time.sleep(0.1)
+        finally:
+            stop(process)
+    text = log.read_text(errors="replace")
+    if FIRMWARE_TPM_FAILURE in text:
+        raise FirmwareFailure(f"firmware could not use the software TPM; see {log}")
+    if timed_out:
+        raise Failure(f"command timed out after {timeout}s; see {log}")
+    if process.returncode:
+        raise Failure(f"command exited {process.returncode}; see {log}")
+    return text
 
 
 def certificate(prefix, log):
@@ -238,7 +303,7 @@ class Suite:
             state.mkdir(exist_ok=True)
             command = [self.args.swtpm, "socket", "--tpm2", "--tpmstate", f"dir={state}",
                        "--ctrl", f"type=unixio,path={sockets}/ctrl",
-                       "--flags", "not-need-init,startup-clear"]
+                       "--flags", "not-need-init,startup-clear", "--log", "fd=1,level=20"]
             ready = sockets / "ctrl"
             if provisioning:
                 command += ["--server", f"type=unixio,path={sockets}/data"]
@@ -298,9 +363,12 @@ class Suite:
         root = self.run / "root-tree"
         for directory in (root, root / "dev", root / "proc", root / "sys"):
             directory.mkdir()
-        run_logged(self.toolchain.guest_command() +
-                   ["-static", "-Os", "-Wall", "-Wextra", "-Werror", "-o", str(root / "init"),
-                    str(HERE / "qemu-init.c")],
+        headers = self.run / "guest-headers"
+        run_logged(["make", "-C", str(SOURCE), f"O={self.build}", "ARCH=arm64",
+                    *self.toolchain.make_args(), "headers_install",
+                    f"INSTALL_HDR_PATH={headers}"],
+                   self.run / "guest-headers.log", timeout=300)
+        run_logged(self.toolchain.guest_command(headers, root / "init", HERE / "qemu-init.c"),
                    self.run / "guest-build.log", timeout=60)
         (root / "proof").write_text(self.proof)
         self.plain = self.run / "root.ext4"
@@ -341,22 +409,34 @@ class Suite:
                 command += ["-chardev", f"socket,id=chrtpm,path={sockets}/ctrl",
                             "-tpmdev", "emulator,id=tpm0,chardev=chrtpm",
                             "-device", "tpm-tis-device,tpmdev=tpm0"]
-                run_logged(command, log, timeout=self.args.timeout)
-        else:
-            run_logged(command, log, timeout=self.args.timeout)
-        return log.read_text(errors="replace"), log
+                return run_vm(command, log, self.args.timeout), log
+        return run_vm(command, log, self.args.timeout), log
+
+    def boot_retrying(self, directory, variables, *args, **kwargs):
+        """Boot from fresh copies of all state, retrying only firmware failures."""
+        for attempt in range(1, BOOT_ATTEMPTS + 1):
+            target = directory / f"retry-{attempt - 1}" if attempt > 1 else directory
+            target.mkdir(exist_ok=True)
+            shutil.copyfile(variables, target / "vars.fd")
+            try:
+                return (*self.boot(target, target / "vars.fd", *args, **kwargs),
+                        target / "vars.fd")
+            except FirmwareFailure as error:
+                if attempt == BOOT_ATTEMPTS:
+                    raise
+                print(f"# retrying {directory.name}: {error}", flush=True)
 
     def enroll(self, record):
         directory = self.run / ("enroll-" + (record or "missing"))
         directory.mkdir()
-        variables = directory / "vars.fd"
-        shutil.copyfile(self.args.firmware_vars, variables)
-        if record:
-            text, log = self.boot(directory, variables, self.provision_disk,
-                                  f"root=/dev/vda rootcrypt_test.record={record}", tpm=False)
-            require(text, f"ROOTCRYPT_PROVISIONED: {record}", log)
-            if "ROOTCRYPT_TEST_FAIL" in text or "Kernel panic" in text:
-                raise Failure(f"EFI provisioning failed; see {log}")
+        # An empty record still boots once, so every test starts from a store
+        # the firmware has already initialized.
+        text, log, variables = self.boot_retrying(
+            directory, self.args.firmware_vars, self.provision_disk,
+            f"root=/dev/vda rootcrypt_test.record={record}", tpm=False)
+        require(text, f"ROOTCRYPT_PROVISIONED: {record or 'none'}", log)
+        if "ROOTCRYPT_TEST_FAIL" in text or "Kernel panic" in text:
+            raise Failure(f"EFI provisioning failed; see {log}")
         return variables
 
     def test(self, case, enrollments):
@@ -364,10 +444,9 @@ class Suite:
         directory.mkdir()
         if case.record not in enrollments:
             enrollments[case.record] = self.enroll(case.record)
-        variables = directory / "vars.fd"
-        shutil.copyfile(enrollments[case.record], variables)
-        text, log = self.boot(directory, variables, self.encrypted, case.options,
-                              tpm=case.tpm, fallback=case.plain_fallback)
+        text, log, _ = self.boot_retrying(directory, enrollments[case.record], self.encrypted,
+                                          case.options, tpm=case.tpm,
+                                          fallback=case.plain_fallback)
         require(text, "efi: EFI v", log)
         partitions = re.findall(r"^ (?P<disk>vd[a-z]): (?P=disk)1\s*$", text, re.MULTILINE)
         expected = 2 if case.plain_fallback else 1
@@ -375,9 +454,9 @@ class Suite:
             raise Failure(f"expected {expected} GPT disks; see {log}")
         if case.tpm:
             require(text, "2.0 TPM", log)
-        if case.witness:
-            require(text, case.witness, log)
-        if "ROOTCRYPT_TEST_FAIL" in text or "WARNING:" in text or "BUG:" in text:
+        for witness in case.witnesses:
+            require(text, witness, log)
+        if "ROOTCRYPT_TEST_FAIL" in text or re.search(r"^(?:WARNING|BUG):", text, re.MULTILINE):
             raise Failure(f"guest reported a test failure or kernel warning; see {log}")
         if case.error:
             pattern = (r"Kernel panic - not syncing: rootcrypt: cannot activate encrypted root \(" +

@@ -6,7 +6,7 @@
 #include "dm-crypt-root.h"
 
 int rootcrypt_parse_record(const void *data, size_t size, const uuid_t *partuuid,
-			  struct rootcrypt_record *record)
+			   struct rootcrypt_record *record)
 {
 	const struct dm_rootcrypt_record *header = data;
 	u32 blob_size, pcr_mask;

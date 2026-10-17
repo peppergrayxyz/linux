@@ -35,13 +35,28 @@ static unsigned long rootcrypt_options __initdata;
 static int rootcrypt_parse_error __initdata;
 static uuid_t rootcrypt_partuuid __initdata;
 
+static const char *const rootcrypt_option_names[] __initconst = {
+	[ROOTCRYPT_DEVICE] = "rootcrypt=",
+	[ROOTCRYPT_KEY] = "rootcrypt.key=",
+	[ROOTCRYPT_TPM] = "rootcrypt.tpm=",
+	[ROOTCRYPT_TOKEN] = "rootcrypt.token=",
+};
+
 static bool __init rootcrypt_option(enum rootcrypt_option option)
 {
 	if (test_and_set_bit(option, &rootcrypt_options)) {
+		pr_err("duplicate %s option\n", rootcrypt_option_names[option]);
 		rootcrypt_parse_error = -EINVAL;
 		return false;
 	}
 	return true;
+}
+
+static void __init rootcrypt_invalid(enum rootcrypt_option option,
+				     const char *value)
+{
+	pr_err("unsupported %s%s\n", rootcrypt_option_names[option], value);
+	rootcrypt_parse_error = -EINVAL;
 }
 
 static int __init rootcrypt_device_setup(char *str)
@@ -49,7 +64,7 @@ static int __init rootcrypt_device_setup(char *str)
 	if (rootcrypt_option(ROOTCRYPT_DEVICE) &&
 	    (strncmp(str, "PARTUUID=", 9) || strlen(str + 9) != UUID_STRING_LEN ||
 	     uuid_parse(str + 9, &rootcrypt_partuuid)))
-		rootcrypt_parse_error = -EINVAL;
+		rootcrypt_invalid(ROOTCRYPT_DEVICE, str);
 	return 1;
 }
 __setup("rootcrypt=", rootcrypt_device_setup);
@@ -57,7 +72,7 @@ __setup("rootcrypt=", rootcrypt_device_setup);
 static int __init rootcrypt_key_setup(char *str)
 {
 	if (rootcrypt_option(ROOTCRYPT_KEY) && strcmp(str, "tpm2"))
-		rootcrypt_parse_error = -EINVAL;
+		rootcrypt_invalid(ROOTCRYPT_KEY, str);
 	return 1;
 }
 __setup("rootcrypt.key=", rootcrypt_key_setup);
@@ -65,7 +80,7 @@ __setup("rootcrypt.key=", rootcrypt_key_setup);
 static int __init rootcrypt_tpm_setup(char *str)
 {
 	if (rootcrypt_option(ROOTCRYPT_TPM) && strcmp(str, "0"))
-		rootcrypt_parse_error = -EINVAL;
+		rootcrypt_invalid(ROOTCRYPT_TPM, str);
 	return 1;
 }
 __setup("rootcrypt.tpm=", rootcrypt_tpm_setup);
@@ -73,7 +88,7 @@ __setup("rootcrypt.tpm=", rootcrypt_tpm_setup);
 static int __init rootcrypt_token_setup(char *str)
 {
 	if (rootcrypt_option(ROOTCRYPT_TOKEN) && strcmp(str, "0"))
-		rootcrypt_parse_error = -EINVAL;
+		rootcrypt_invalid(ROOTCRYPT_TOKEN, str);
 	return 1;
 }
 __setup("rootcrypt.token=", rootcrypt_token_setup);
@@ -91,8 +106,10 @@ static int __init rootcrypt_wait_for_devices(const char *name, dev_t *dev)
 		if (chip) {
 			tpm_ready = chip->dev_num == 0 && tpm_is_tpm2(chip) > 0;
 			put_device(&chip->dev);
-			if (!tpm_ready)
+			if (!tpm_ready) {
+				pr_err("the first TPM is not TPM2 chip 0\n");
 				return -ENODEV;
+			}
 		}
 		if (disk_ready && tpm_ready)
 			return 0;
@@ -115,8 +132,10 @@ static int __init rootcrypt_read_record(void **data, size_t *len)
 	u32 attributes;
 	int i, ret;
 
-	if (!efi_enabled(EFI_BOOT) || !efivar_is_available())
+	if (!efi_enabled(EFI_BOOT) || !efivar_is_available()) {
+		pr_err("EFI runtime variable services are unavailable\n");
 		return -ENODEV;
+	}
 	snprintf(name, sizeof(name), "LinuxRootKey-%pUb-0", &rootcrypt_partuuid);
 	for (i = 0; i <= strlen(name); i++)
 		efi_name[i] = name[i];
@@ -144,11 +163,12 @@ static int __init rootcrypt_read_record(void **data, size_t *len)
 	return 0;
 free:
 	kfree(buffer);
+	pr_err("cannot read enrollment EFI variable %s (%d)\n", name, ret);
 	return ret;
 }
 
 static int __init rootcrypt_create_mapping(dev_t dev, sector_t sectors,
-					  const struct rootcrypt_record *record)
+					   const struct rootcrypt_record *record)
 {
 	struct dm_target_spec spec = { .length = sectors };
 	struct dm_target_spec *specs[] = { &spec };
@@ -193,6 +213,7 @@ static int __init rootcrypt_create_mapping(dev_t dev, sector_t sectors,
 	kfree_sensitive(payload);
 	if (IS_ERR(key)) {
 		ret = PTR_ERR(key);
+		pr_err("cannot unseal the volume key (%d)\n", ret);
 		goto revert;
 	}
 
@@ -202,6 +223,8 @@ static int __init rootcrypt_create_mapping(dev_t dev, sector_t sectors,
 		 "aes-xts-plain64 :64:trusted:%s 0 %u:%u 0",
 		 ROOTCRYPT_KEY_NAME, MAJOR(dev), MINOR(dev));
 	ret = dm_early_create(&dmi, specs, args);
+	if (ret)
+		pr_err("cannot create the dm-crypt mapping (%d)\n", ret);
 	key_revoke(key_ref_to_ptr(key));
 	key_ref_put(key);
 revert:
@@ -224,42 +247,59 @@ int __init dm_crypt_root_setup(const char *root)
 
 	if (!rootcrypt_options)
 		return 0;
-	if (rootcrypt_parse_error ||
-	    !test_bit(ROOTCRYPT_DEVICE, &rootcrypt_options) ||
-	    !test_bit(ROOTCRYPT_KEY, &rootcrypt_options) ||
-	    strcmp(root, "/dev/dm-0"))
+	if (rootcrypt_parse_error)
+		return rootcrypt_parse_error;
+	if (!test_bit(ROOTCRYPT_DEVICE, &rootcrypt_options) ||
+	    !test_bit(ROOTCRYPT_KEY, &rootcrypt_options)) {
+		pr_err("rootcrypt=PARTUUID=<uuid> and rootcrypt.key=tpm2 are required\n");
 		return -EINVAL;
+	}
+	if (strcmp(root, "/dev/dm-0")) {
+		pr_err("root=/dev/dm-0 is required, not root=%s\n", root);
+		return -EINVAL;
+	}
 
 	snprintf(device, sizeof(device), "PARTUUID=%pUb", &rootcrypt_partuuid);
 	ret = rootcrypt_wait_for_devices(device, &dev);
 	if (ret)
 		return ret;
 	ret = trusted_key_init_tpm();
-	if (ret)
+	if (ret) {
+		pr_err("the TPM trusted-key backend is unavailable (%d)\n", ret);
 		return ret;
+	}
 	ret = rootcrypt_read_record(&data, &size);
 	if (ret)
 		return ret;
 	ret = rootcrypt_parse_record(data, size, &rootcrypt_partuuid, &record);
-	if (ret)
+	if (ret) {
+		pr_err("%s\n", ret == -EKEYREJECTED ?
+		       "the enrollment is bound to a different partition" :
+		       "malformed or unsupported enrollment record");
 		goto free;
+	}
 	/* Only compiled-in certificates may authorize an enrollment. */
 	ret = verify_pkcs7_signature(data, record.signed_size, record.signature,
 				     record.signature_size, NULL,
 				     VERIFYING_FIRMWARE_SIGNATURE, NULL, NULL);
-	if (ret)
+	if (ret) {
+		pr_err("enrollment signature verification failed (%d)\n", ret);
 		goto free;
+	}
 
 	backing = bdev_file_open_by_dev(dev, BLK_OPEN_READ, NULL, NULL);
 	if (IS_ERR(backing)) {
 		ret = PTR_ERR(backing);
+		pr_err("cannot open the backing partition (%d)\n", ret);
 		goto free;
 	}
 	sectors = bdev_nr_sectors(file_bdev(backing));
-	if (!sectors)
+	if (!sectors) {
+		pr_err("the backing partition is empty\n");
 		ret = -EINVAL;
-	else
+	} else {
 		ret = rootcrypt_create_mapping(dev, sectors, &record);
+	}
 	fput(backing);
 free:
 	kfree(data);

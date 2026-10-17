@@ -87,7 +87,7 @@ obj-$(CONFIG_DM_WRITECACHE)	+= dm-writecache.o
 obj-$(CONFIG_SECURITY_LOADPIN_VERITY)	+= dm-verity-loadpin.o
 
 obj-$(CONFIG_DM_CRYPT_ROOT) += dm-crypt-root.o dm-crypt-root-record.o
-obj-$(CONFIG_DM_CRYPT_ROOT_KUNIT_TEST) += dm-crypt-root-test.o
+obj-$(CONFIG_DM_CRYPT_ROOT_KUNIT_TEST) += tests/dm_crypt_root_kunit.o
 
 ifeq ($(CONFIG_DM_INIT),y)
 dm-mod-objs			+= dm-init.o

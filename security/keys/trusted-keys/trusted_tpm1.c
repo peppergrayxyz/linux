@@ -54,6 +54,7 @@ static inline void dump_options(struct trusted_key_options *o)
 	pr_debug("sealing key type %d\n", o->keytype);
 	pr_debug("sealing key handle %0X\n", o->keyhandle);
 	pr_debug("pcrlock %d\n", o->pcrlock);
+	pr_debug("pcr_mask %06x\n", o->pcr_mask);
 	pr_debug("pcrinfo %d\n", o->pcrinfo_len);
 	print_hex_dump_debug("pcrinfo ", DUMP_PREFIX_NONE,
 			     16, 1, o->pcrinfo, o->pcrinfo_len, 0);

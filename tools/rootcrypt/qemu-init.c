@@ -1,14 +1,15 @@
 // SPDX-License-Identifier: GPL-2.0-only
-/* Static PID 1 for the rootcrypt QEMU tests. No shell or initramfs is used. */
+/*
+ * Static PID 1 for the rootcrypt QEMU tests. No shell or initramfs is used.
+ * It builds against tools/include/nolibc, so no ARM64 C library is needed.
+ */
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <sys/mount.h>
 #include <sys/reboot.h>
 #include <sys/stat.h>
-#include <sys/statfs.h>
 #include <sys/sysmacros.h>
 #include <unistd.h>
 
@@ -16,10 +17,11 @@ static void finish(int failed)
 {
 	if (failed)
 		printf("ROOTCRYPT_TEST_FAIL: %s\n", strerror(errno));
-	sync();
+	/* Both roots are read-only and efivarfs writes are synchronous. */
+	fflush(stdout);
 	reboot(RB_POWER_OFF);
 	for (;;)
-		pause();
+		sleep(1);
 }
 
 static ssize_t read_file(const char *path, char *buffer, size_t capacity)
@@ -53,16 +55,29 @@ static ssize_t read_file(const char *path, char *buffer, size_t capacity)
 	return total;
 }
 
+static int valid_record_name(const char *name)
+{
+	for (; *name; name++)
+		if (!((*name >= 'a' && *name <= 'z') ||
+		      (*name >= '0' && *name <= '9') || *name == '-'))
+			return 0;
+	return 1;
+}
+
 static void provision(const char *name)
 {
 	char path[512], variable[256], record[8192], check[8192];
 	ssize_t length, written;
 	int fd;
 
-	if (!*name || strspn(name, "abcdefghijklmnopqrstuvwxyz0123456789-") !=
-	    strlen(name)) {
+	if (!valid_record_name(name)) {
 		errno = EINVAL;
 		finish(1);
+	}
+	/* An empty name only lets the firmware initialize its variable store. */
+	if (!*name) {
+		printf("ROOTCRYPT_PROVISIONED: none\n");
+		return;
 	}
 	if (mount("efivarfs", "/sys/firmware/efi/efivars", "efivarfs", 0, NULL))
 		finish(1);
@@ -94,16 +109,38 @@ static void provision(const char *name)
 	printf("ROOTCRYPT_PROVISIONED: %s\n", name);
 }
 
+/* Return whether the "/" mount of device major:minor has filesystem @type. */
+static int root_mount_is(unsigned int major, unsigned int minor, const char *type)
+{
+	char mounts[8192], device[64], *line, *end, *fields;
+	size_t length = strlen(type);
+
+	if (read_file("/proc/self/mountinfo", mounts, sizeof(mounts)) < 0)
+		return 0;
+	snprintf(device, sizeof(device), " %u:%u / / ", major, minor);
+	for (line = mounts; *line; line = end + 1) {
+		end = strchr(line, '\n');
+		if (!end)
+			return 0;
+		*end = '\0';
+		if (!strstr(line, device))
+			continue;
+		fields = strstr(line, " - ");
+		return fields && !strncmp(fields + 3, type, length) &&
+		       fields[3 + length] == ' ';
+	}
+	return 0;
+}
+
 static void check_root(void)
 {
 	char path[128], name[64], proof[128];
 	struct stat root, mapper;
-	struct statfs fs;
 
-	if (stat("/", &root) || stat("/dev/dm-0", &mapper) || statfs("/", &fs))
+	if (stat("/", &root) || stat("/dev/dm-0", &mapper))
 		finish(1);
 	if (root.st_dev != mapper.st_rdev || !S_ISBLK(mapper.st_mode) ||
-	    fs.f_type != 0xef53) {
+	    !root_mount_is(major(root.st_dev), minor(root.st_dev), "ext4")) {
 		errno = ENODEV;
 		finish(1);
 	}
@@ -123,19 +160,24 @@ static void check_root(void)
 
 int main(void)
 {
-	char command_line[4096], *option, *state = NULL;
+	static const char option[] = "rootcrypt_test.record=";
+	char command_line[4096], *word, *end;
 	const char *record = NULL;
 
-	setbuf(stdout, NULL);
 	if (mount("proc", "/proc", "proc", 0, NULL) ||
 	    mount("sysfs", "/sys", "sysfs", 0, NULL))
 		finish(1);
 	if (read_file("/proc/cmdline", command_line, sizeof(command_line)) < 0)
 		finish(1);
-	for (option = strtok_r(command_line, "\n ", &state); option;
-	     option = strtok_r(NULL, "\n ", &state)) {
-		if (!strncmp(option, "rootcrypt_test.record=", 22))
-			record = option + 22;
+	for (word = command_line; *word; word = end) {
+		while (*word == ' ' || *word == '\n')
+			word++;
+		for (end = word; *end && *end != ' ' && *end != '\n'; end++)
+			;
+		if (*end)
+			*end++ = '\0';
+		if (!strncmp(word, option, sizeof(option) - 1))
+			record = word + sizeof(option) - 1;
 	}
 	if (record)
 		provision(record);

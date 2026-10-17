@@ -15,7 +15,6 @@ Device Mapper
     dm-flakey
     dm-ima
     dm-init
-    dm-rootcrypt
     dm-inlinecrypt
     dm-integrity
     dm-io
@@ -23,6 +22,7 @@ Device Mapper
     dm-pcache
     dm-queue-length
     dm-raid
+    dm-rootcrypt
     dm-service-time
     dm-uevent
     dm-zoned

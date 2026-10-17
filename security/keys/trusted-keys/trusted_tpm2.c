@@ -455,10 +455,8 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
 	tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_LOAD);
 
 	rc = tpm_buf_append_name(chip, buf, options->keyhandle, NULL);
-	if (rc) {
-		tpm2_end_auth_session(chip);
+	if (rc)
 		return rc;
-	}
 
 	tpm_buf_append_hmac_session(chip, buf, 0, options->keyauth,
 				    TPM_DIGEST_SIZE);
@@ -493,7 +491,7 @@ static int tpm2_load_cmd(struct tpm_chip *chip,
  * The caller holds the chip operations and TPM mutex across this sequence.
  */
 static int tpm2_start_pcr_session(struct tpm_chip *chip, u32 pcr_mask,
-				u32 *handle)
+				  u32 *handle)
 {
 	struct tpm_buf *buf __free(kfree) = NULL;
 	u8 nonce[SHA256_DIGEST_SIZE];
@@ -520,10 +518,10 @@ static int tpm2_start_pcr_session(struct tpm_chip *chip, u32 pcr_mask,
 	if (rc)
 		return tpm_ret_to_err(rc);
 
+	/* The TPM created a session; flush it if the response is unexpected. */
 	session = get_unaligned_be32(buf->data + TPM_HEADER_SIZE);
-	if (tpm2_handle_mso(session) != TPM2_MSO_POLICY)
-		return -EIO;
-	if (tpm_buf_length(buf) != TPM_HEADER_SIZE + 6 + sizeof(nonce) ||
+	if (tpm2_handle_mso(session) != TPM2_MSO_POLICY ||
+	    tpm_buf_length(buf) != TPM_HEADER_SIZE + 6 + sizeof(nonce) ||
 	    get_unaligned_be16(buf->data + TPM_HEADER_SIZE + 4) != sizeof(nonce)) {
 		rc = -EIO;
 		goto flush;
@@ -590,10 +588,8 @@ static int tpm2_unseal_cmd(struct tpm_chip *chip,
 	tpm_buf_reset(buf, TPM2_ST_SESSIONS, TPM2_CC_UNSEAL);
 
 	rc = tpm_buf_append_name(chip, buf, blob_handle, NULL);
-	if (rc) {
-		tpm2_end_auth_session(chip);
+	if (rc)
 		return rc;
-	}
 
 	if (!options->policyhandle) {
 		tpm_buf_append_hmac_session(chip, buf, TPM2_SA_ENCRYPT,

@@ -15,6 +15,6 @@ struct rootcrypt_record {
 };
 
 int rootcrypt_parse_record(const void *data, size_t size, const uuid_t *partuuid,
-			  struct rootcrypt_record *record);
+			   struct rootcrypt_record *record);
 
 #endif /* _DM_CRYPT_ROOT_H */

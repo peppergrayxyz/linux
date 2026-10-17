@@ -1,6 +1,8 @@
-=====================================
+.. SPDX-License-Identifier: GPL-2.0
+
+======================================
 TPM2 root activation without initramfs
-=====================================
+======================================
 
 ``CONFIG_DM_CRYPT_ROOT`` activates one plain dm-crypt root partition before
 mounting root. It loads a signed enrollment from an EFI variable, unseals a
@@ -20,13 +22,15 @@ TPM2 transport, storage controller, GPT partition parser, root filesystem,
 device mapper, dm-crypt and TPM-backed trusted keys. Enable
 ``CONFIG_DM_CRYPT_ROOT`` and disable ``CONFIG_BLK_DEV_INITRD``. The option selects
 AES-XTS, SHA-256 signature hashing and TPM HMAC/encrypted transactions. It
-requires ``CONFIG_SYSTEM_DATA_VERIFICATION`` (enabled, for example, by
-``CONFIG_MODULE_SIG``).
+requires ``CONFIG_SYSTEM_DATA_VERIFICATION``, which has no prompt of its own;
+it is enabled, for example, by ``CONFIG_MODULE_SIG``.
 
 Use an RSA/SHA-256 enrollment signing key. Include its X.509 certificate using
 ``CONFIG_SYSTEM_TRUSTED_KEYS``. All certificates in the built-in trusted
 keyring are authorized to sign enrollments; secondary and platform keyrings
-are not consulted. Keep that built-in trust set under the owner's control.
+are not consulted. This includes the module signing certificate when
+``CONFIG_MODULE_SIG`` is enabled, so whoever holds the module signing key can
+also sign enrollments. Keep that built-in trust set under the owner's control.
 
 The boot parameters are::
 
@@ -43,8 +47,10 @@ key backend would otherwise be selected.
 The coordinator runs in ``prepare_namespace()``, after initcalls. It waits up
 to 30 seconds for the partition and TPM2 chip 0, retries trusted-key backend
 initialization if its initial attempt preceded TPM probing, then creates
-minor 0. Do not assign that minor through ``dm-mod.create=`` as well. On any
-activation error the kernel panics; it does not fall back to an unencrypted
+minor 0. Devices created through ``dm-mod.create=`` exist earlier and take minor
+0 unless they are given another minor, so give each of them an explicit
+nonzero minor. On any activation error the kernel logs the failed step with a
+``rootcrypt:`` prefix and panics; it does not fall back to an unencrypted
 root. ``rootwait`` does not extend this coordinator's device timeout.
 
 Enrollment format
@@ -141,8 +147,15 @@ allowed for a policy that does not use PolicyAuthValue. An additional salted
 HMAC session authenticates Unseal and encrypts its returned key, reusing the
 existing TPM session implementation. All temporary sessions are flushed.
 
+The salt is encrypted to the TPM's null primary key, which the kernel cannot
+certify at this point. Encryption therefore defeats passive bus snooping, but
+an active interposer is only detected afterwards, when userspace certifies the
+key name in ``/sys/class/tpm/tpm0/null_name`` (see
+Documentation/security/tpm/tpm-security.rst). If that certification fails,
+treat the volume key as disclosed.
+
 Boot and key lifetime
-====================
+=====================
 
 Sign the EFI-stub kernel and authenticate its effective command line. For a
 fixed appliance, the architecture's built-in command-line override can keep
@@ -155,6 +168,13 @@ trusted-key support. The coordinator revokes its temporary key and drops the
 keyring after activation. Plaintext volume-key material remains in kernel
 memory for the active dm-crypt device.
 
+Activation does not extend any PCR. Until a selected PCR changes, anything
+able to send TPM commands later in the same boot, such as root through
+``/dev/tpmrm0``, can repeat PolicyPCR and Unseal to recover the volume key.
+To close this window, include a PCR in the selection that early userspace
+extends once the root is mounted, and do not select resettable PCRs such as
+16 or 23 for production enrollments.
+
 AES-XTS protects confidentiality, not filesystem authenticity. This feature
 does not add an authenticated root filesystem. Kernel updates that change
 selected PCRs require resealing the same volume key and signing a replacement
@@ -165,8 +185,31 @@ Testing
 =======
 
 ``CONFIG_DM_CRYPT_ROOT_KUNIT_TEST`` tests enrollment bounds, versioning, PCR
-selection and partition binding. The packaging and signature tests can run
-without a TPM::
+selection and partition binding. It needs neither firmware nor a TPM; for
+example, run it under x86_64 QEMU with this ``kunitconfig`` file::
+
+  CONFIG_KUNIT=y
+  CONFIG_PCI=y
+  CONFIG_ACPI=y
+  CONFIG_EFI=y
+  CONFIG_MD=y
+  CONFIG_BLK_DEV_DM=y
+  CONFIG_DM_CRYPT=y
+  CONFIG_KEYS=y
+  CONFIG_TCG_TPM=y
+  CONFIG_TRUSTED_KEYS=y
+  CONFIG_TRUSTED_KEYS_TPM=y
+  CONFIG_MODULES=y
+  CONFIG_MODULE_SIG=y
+  CONFIG_DM_CRYPT_ROOT=y
+  CONFIG_DM_CRYPT_ROOT_KUNIT_TEST=y
+  # CONFIG_BLK_DEV_INITRD is not set
+
+::
+
+  ./tools/testing/kunit/kunit.py run --arch=x86_64 --kunitconfig=kunitconfig
+
+The packaging and signature tests can run without a TPM::
 
   python3 tools/rootcrypt/test_mkenrollment.py
 
@@ -190,10 +233,10 @@ The additional requirements are:
   paths are ``/usr/share/AAVMF/AAVMF_CODE.fd`` and
   ``/usr/share/AAVMF/AAVMF_VARS.fd``; override them with ``--firmware-code``
   and ``--firmware-vars`` if needed.
-* ARM64 static libc, startup objects and a compiler runtime for the small
-  guest PID 1. On an ARM64 host the native development libraries suffice.
-  On another architecture, install the corresponding ARM64 development
-  libraries or provide a target sysroot as described below.
+
+The small guest PID 1 is built against the kernel's ``tools/include/nolibc``
+and UAPI headers installed from the test kernel build, so no ARM64 C library
+or sysroot is needed.
 
 Run from the kernel source tree::
 
@@ -213,8 +256,7 @@ GCC builds use GCC and GNU binutils. For GCC on a non-ARM64 host, add
 Clang builds use ``LLVM=1`` for the kernel, including the integrated
 assembler, and Clang/LLD with an explicit ARM64 target for the guest.
 Clang mode does not require GCC compiler executables or ``--cross-compile``.
-Its compiler/runtime libraries still need to support linking ARM64 Linux
-userspace programs statically.
+The guest links only nolibc, plus ``libgcc`` in GCC mode.
 
 The LLVM tools must be on ``PATH``, or can be selected with ``--llvm`` using
 the same convention as Kbuild. For example::
@@ -228,12 +270,6 @@ Use an LLVM version supported by this kernel (see :ref:`kbuild_llvm`). The
 same version/path is used for kernel configuration, compilation, host tools,
 and the guest compiler/linker. ``--guest-cflags`` accepts additional guest
 compile/link flags for either compiler; it does not change kernel flags.
-For a Clang cross build whose ARM64 libraries are outside the default
-search paths, for example::
-
-  python3 tools/rootcrypt/test_qemu.py --compiler clang \
-      --guest-cflags='--sysroot=/opt/arm64/sysroot --gcc-toolchain=/opt/arm64/toolchain' \
-      --work-dir /tmp/rootcrypt-clang-cross
 
 The work directory must be empty on the first run. It receives the generated
 signing certificate/private key, kernel build, and a separate artifact
@@ -281,8 +317,9 @@ Negative cases cover:
 * Rejection when ``root=`` points to an attached, bootable plaintext disk.
 * Missing TPM and missing backing partition, including timeout handling.
 
-Enrollment/option rejection cases require the expected rootcrypt panic and
-no mapper activation, root mount, or guest success marker. The wrong-volume-key
+Enrollment/option rejection cases require the expected rootcrypt panic, the
+kernel's ``rootcrypt:`` message for the failed step, and no mapper
+activation, root mount, or guest success marker. The wrong-volume-key
 case must activate the mapper but fail the filesystem mount. A successful
 happy boot is always run first, including when selecting individual cases::
 
@@ -294,7 +331,16 @@ Results use TAP on stdout and ``results.json`` in the invocation's artifact
 directory. ``toolchain.json`` records the compiler selection and guest flags.
 Each boot retains its command, serial console and software-TPM log.
 The runner terminates its QEMU and software-TPM processes on errors or
-interruption. Exit status is zero for success, one for failure, and four
+interruption.
+
+The AAVMF firmware occasionally stalls while using QEMU's emulated TPM before
+it starts the kernel, particularly on loaded hosts. A boot whose kernel has
+not started within a third of ``--timeout``, or whose EFI stub reports that the
+firmware failed to measure into the TPM, is a firmware failure. Such a boot is
+repeated with fresh copies of its variable store and TPM state, up to three
+attempts; retries are reported as TAP comments and their logs are kept in
+``retry-<n>`` subdirectories. Failures after the kernel has started are never
+retried. Exit status is zero for success, one for failure, and four
 when required host tools or firmware files are missing.
 
 The firmware template must have Secure Boot disabled for this suite: it
